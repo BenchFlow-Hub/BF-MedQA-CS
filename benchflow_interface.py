@@ -45,9 +45,9 @@ class MedQABench(BaseBench):
                 result = json.load(f)
         else:
             return BenchmarkResult(
+                task_id=task_id,
                 is_resolved=False,
-                message={"error": "Result file not found"},
-                log={},
+                log={"error": "Result file not found"},
                 metrics={},
                 other={}
             )
@@ -57,16 +57,16 @@ class MedQABench(BaseBench):
                 log = json.load(f)
         else:
             return BenchmarkResult(
+                task_id=task_id,
                 is_resolved=False,
-                message={"error": "Log file not found"},
-                log={},
+                log={"error": "Log file not found"},
                 metrics={},
                 other={}
             )
 
         return BenchmarkResult(
+            task_id=task_id,
             is_resolved=True,
-            message={},
             log=log[0],
             metrics=result,
             other={}
