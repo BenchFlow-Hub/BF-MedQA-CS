@@ -25,7 +25,7 @@ class Section(Enum):
     other = "other"
 
 
-def load_data(dataset_path: str, is_examiner: bool):
+def load_data(dataset_path: str, is_examiner: bool, section: str, case: str):
     dataset_path = Path(dataset_path).resolve()
     if dataset_path.is_dir():
         # Locate the appropriate dataset file using default naming
@@ -41,11 +41,14 @@ def load_data(dataset_path: str, is_examiner: bool):
 
     with dataset_path.open("r") as f:
         dataset = json.load(f)
-
+    # filter dataset by section
+    dataset = [data for data in dataset if data["section"] == section]
+    # filter dataset by case
+    dataset = [data for data in dataset if data["case_id"] == int(case)]
     return dataset
 
 
-def save_result(path: str, dataset: dict, is_examiner: bool):
+def save_result(path: str, dataset: dict, is_examiner: bool, section: str):
     output_path = Path(path).resolve()
 
     if output_path.suffix != "":
@@ -53,10 +56,9 @@ def save_result(path: str, dataset: dict, is_examiner: bool):
         output_file = output_path
     else:
         output_path.mkdir(parents=True, exist_ok=True)
-        curr_datetime = datetime.now().strftime("%m-%d-%H")
         file_prefix = "med-exam" if is_examiner else "med-student"
-        output_file = output_path / f"{file_prefix}-{curr_datetime}.json"
-
+        output_file = output_path / f"{file_prefix}.json"
+    dataset = [data for data in dataset if data["section"] == section]
     logging.debug(f"Saving dataset to {output_file}")
     with output_file.open("w", encoding="UTF-8") as f:
         json.dump(dataset, f, indent=2)
@@ -137,9 +139,6 @@ def call_api(
     # Create prompt template and parser
     prompt = PromptTemplate.from_template(prompt_template)
     parser = StrOutputParser()
-
-    # Set up the evaluation chain
-    eval_chain = prompt | parser
 
     # Preprocess input data
     pre_processed_input = pre_processing_func(input_data)
@@ -226,7 +225,7 @@ def llm_as_medical_student(
     logging.info(f"Running llm as medical student on {section}:")
 
     # Load the dataset
-    dataset = load_data(med_student_dataset_path, is_examiner=False)
+    dataset = load_data(med_student_dataset_path, is_examiner=False, section=section, case=case)
 
     # Parse case range
     start_case, end_case = (1, 44) if str(case) == "all" else parse_range(case)
@@ -240,16 +239,6 @@ def llm_as_medical_student(
 
     # Determine whether to use dataset input data or custom input data
     use_dataset_input_data = input_data is None
-
-    # Set up the language model
-    # if model is None:
-    #     if model_parameters is None:
-    #         logging.info(
-    #             "Using default model parameters: model_name=gpt-4o-mini, temperature=0.9"
-    #         )
-    #         model = ChatOpenAI(model_name="gpt-3.5-turbo-1106", temperature=0.9)
-    #     else:
-    #         model = ChatOpenAI(**model_parameters)
 
     # Set default pre-processing and post-processing functions if not provided
     if pre_processing is None:
@@ -297,8 +286,6 @@ def llm_as_medical_student(
                 input_data_dict = input_data[int(data["case_id"])]
 
             # Run the model
-            # print(prompt)
-            # print(input_data_dict)
             result = call_api(
                 prompt_template=prompt,
                 input_data=input_data_dict,
@@ -313,7 +300,7 @@ def llm_as_medical_student(
             data["output"]["benchflow"] = result
 
             # save updated dataset
-            output_file_path = save_result(output_path, dataset, is_examiner=False)
+            output_file_path = save_result(output_path, dataset, is_examiner=False, section=section)
 
     logging.info(f"Finished. Output saved to: {output_file_path}")
     return output_file_path
@@ -440,7 +427,8 @@ def llm_as_examiner(
     Returns:
         None: Results are saved to the specified output path.
     """
-    result_summary = {"total_steps": 0, "total_score": 0, "score_percentage": 0.0}
+    from collections import defaultdict
+    result_summary = defaultdict(int)
 
     logging.info(f"Running llm as examiner on {section}:")
 
@@ -458,13 +446,13 @@ def llm_as_examiner(
     # Load medical student dataset if provided
     if med_student_dataset_path:
         logging.info("Use med-student and med-exam dataset")
-        student_dataset = load_data(med_student_dataset_path, is_examiner=False)
+        student_dataset = load_data(med_student_dataset_path, is_examiner=False, section=section, case=case)
     else:
         logging.info("Use med-exam dataset only")
         student_dataset = None
 
     # Load medical examiner dataset
-    dataset = load_data(med_exam_dataset_path, is_examiner=True)
+    dataset = load_data(med_exam_dataset_path, is_examiner=True, section=section, case=case)
 
     start_case, end_case = (1, 44) if str(case) == "all" else parse_range(case)
     # Check if parse_range returned None
@@ -599,9 +587,19 @@ def llm_as_examiner(
 
             parsed_dict = json.loads(result)
             logging.debug(parsed_dict)
-            result_summary["total_steps"] += 1
-            result_summary["total_score"] += int(parsed_dict['score'])
-
+            if section == "qa":
+                result_summary["total_score"] += 1
+                result_summary["score_obtained"] += int(parsed_dict['score'])
+            elif section == "physical_exam" or section == "closure":
+                result_summary["score_obtained"] += int(parsed_dict['overall score'])
+            elif section == "diagnosis":
+                match = re.match(r'(\d+)\s*/\s*(\d+)', parsed_dict['total score'])
+                if match:
+                    score_obtained = int(match.group(1))
+                    score_total = int(match.group(2))
+                    result_summary["total_score"] += score_total
+                    result_summary["quality_score"] += parsed_dict['quality score']
+                    result_summary["score_obtained"] += score_obtained
             # save result
             if input_student_model_name not in data["output"]:
                 data["output"][input_student_model_name] = {}
@@ -609,12 +607,11 @@ def llm_as_examiner(
             data["output"][input_student_model_name][examiner_model_name] = result
 
             # save updated dataset
-            output_file_path = save_result(output_path, dataset, is_examiner=True)
+            output_file_path = save_result(output_path, dataset, is_examiner=True, section=section)
     
     summary_path = Path("result/result_summary.json")
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     with open(summary_path, "w") as f:
-        result_summary["score_percentage"] = result_summary["total_score"] / result_summary["total_steps"]
         json.dump(result_summary, f)
 
     logging.info(f"Finished. Metrics saved to: {summary_path}")
