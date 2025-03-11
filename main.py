@@ -13,9 +13,22 @@ from typing import Callable, Union, Tuple
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
-
+from benchflow import BenchClient
+from typing import Dict, Any
 import utils
 
+class MedQACSClient(BenchClient):
+    def __init__(self, intelligence_url: str):
+        print(f"Initializing MedQACSClient with intelligence_url: {intelligence_url}")
+        super().__init__(intelligence_url)
+
+    def prepare_input(self, raw_step_inputs: Dict[str, Any]) -> Dict[str, Any]:
+        return {"user_prompt": raw_step_inputs["user_prompt"], 
+                "prompt_template": raw_step_inputs["prompt_template"], 
+                "filling_data": raw_step_inputs["input_data"]}
+
+    def parse_response(self, raw_step_outputs: str) -> Dict[str, Any]:
+        return {"output": raw_step_outputs}
 
 class Section(Enum):
     qa = "qa"
@@ -111,6 +124,7 @@ def call_api(
     input_data: dict[str, str],
     pre_processing_func: Callable = lambda x: x,
     post_processing_func: Callable = lambda x: x["output"],
+    intelligence_url: str = None,
     **kwargs,
 ) -> str:
     """
@@ -138,20 +152,14 @@ def call_api(
     """
     # Create prompt template and parser
     prompt = PromptTemplate.from_template(prompt_template)
-    parser = StrOutputParser()
 
     # Preprocess input data
     pre_processed_input = pre_processing_func(input_data)
     filled_prompt = prompt.format(**pre_processed_input)
 
-    from openai import OpenAI
-
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": filled_prompt}],
-    )
-    raw_result = response.choices[0].message.content
+    client = MedQACSClient(intelligence_url)
+    env = {"user_prompt": filled_prompt, "prompt_template": prompt_template, "input_data": input_data}
+    raw_result = client.get_response(env)["output"]
     logging.debug(raw_result)
 
     # Post-process the result
@@ -184,6 +192,7 @@ def llm_as_medical_student(
     ] = None,  # Custom input data for each case number
     pre_processing: Callable = None,
     post_processing: Callable = None,
+    intelligence_url: str = None,
     **kwargs,
 ):
     """
@@ -291,6 +300,7 @@ def llm_as_medical_student(
                 input_data=input_data_dict,
                 pre_processing_func=pre_processing,
                 post_processing_func=post_processing,
+                intelligence_url=intelligence_url,
                 **kwargs,
             )
             # parse result
@@ -685,6 +695,7 @@ def main(args):
                 med_student_dataset_path=args.med_student_dataset,
                 output_path=args.output,
                 model_parameters={"model_name": args.student_model, "temperature": 0.9},
+                intelligence_url=args.intelligence_url,
                 # prompt_template="",  # Uncomment and provide a template if needed
             )
 
@@ -815,6 +826,9 @@ def parse_args():
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Enable verbose output"
+    )
+    parser.add_argument(
+        "-i", "--intelligence_url", type=str, help="URL of the intelligence service"
     )
 
     args = parser.parse_args()
