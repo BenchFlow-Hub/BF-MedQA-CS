@@ -104,8 +104,7 @@ def parse_range(val: str) -> Union[Tuple[int, int], None]:
     return None
 
 
-def run_model(
-    model,
+def call_api(
     prompt_template: str,
     input_data: dict[str, str],
     pre_processing_func: Callable = lambda x: x,
@@ -140,18 +139,20 @@ def run_model(
     parser = StrOutputParser()
 
     # Set up the evaluation chain
-    eval_chain = prompt | model | parser
+    eval_chain = prompt | parser
 
     # Preprocess input data
     pre_processed_input = pre_processing_func(input_data)
+    filled_prompt = prompt.format(**pre_processed_input)
 
-    # Run the model and get the result
-    if use_langfuse:
-        config = {"callbacks": [langfuse_handler]}
-    else:
-        config = {}
-    raw_result = eval_chain.invoke(pre_processed_input, config=config)
+    from openai import OpenAI
 
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": filled_prompt}],
+    )
+    raw_result = response.choices[0].message.content
     logging.debug(raw_result)
 
     # Post-process the result
@@ -226,10 +227,6 @@ def llm_as_medical_student(
 
     # Load the dataset
     dataset = load_data(med_student_dataset_path, is_examiner=False)
-    # For debugging
-    dataset = dataset[:1]
-    print(dataset)
-    exit()
 
     # Parse case range
     start_case, end_case = (1, 44) if str(case) == "all" else parse_range(case)
@@ -300,21 +297,20 @@ def llm_as_medical_student(
                 input_data_dict = input_data[int(data["case_id"])]
 
             # Run the model
-            print(prompt)
-            print(input_data_dict)
-            # result = run_model(
-            #     model=model,
-            #     prompt_template=prompt,
-            #     input_data=input_data_dict,
-            #     pre_processing_func=pre_processing,
-            #     post_processing_func=post_processing,
-            #     **kwargs,
-            # )
+            # print(prompt)
+            # print(input_data_dict)
+            result = call_api(
+                prompt_template=prompt,
+                input_data=input_data_dict,
+                pre_processing_func=pre_processing,
+                post_processing_func=post_processing,
+                **kwargs,
+            )
+            # parse result
+            logging.debug(result)
 
-            # logging.debug(result)
-
-            # # save result
-            # data["output"][model.model_name] = result
+            # save result
+            data["output"]["benchflow"] = result
 
             # save updated dataset
             output_file_path = save_result(output_path, dataset, is_examiner=False)
@@ -322,6 +318,66 @@ def llm_as_medical_student(
     logging.info(f"Finished. Output saved to: {output_file_path}")
     return output_file_path
 
+def run_model(
+    model,
+    prompt_template: str,
+    input_data: dict[str, str],
+    pre_processing_func: Callable = lambda x: x,
+    post_processing_func: Callable = lambda x: x["output"],
+    **kwargs,
+) -> str:
+    """
+    Run a language model with the given prompt template and input data.
+
+    Args:
+        model: The language model to use.
+        prompt_template (str): The template for generating the prompt.
+        input_data (dict[str, str]): The input data to be used in the prompt.
+        pre_processing (Callable, optional): Function to pre-process the input data. Defaults to identity function.
+        post_processing (Callable, optional): Function to post-process the model output. Defaults to identity function.
+        **kwargs: Additional keyword arguments.
+
+    Returns:
+        str: The processed result from the model.
+
+    Process:
+    1. Create a PromptTemplate from the given template.
+    2. Set up a StrOutputParser for parsing the model's output.
+    3. Create an evaluation chain: prompt -> model -> parser.
+    4. Pre-process the input data.
+    5. Run the evaluation chain with the pre-processed input.
+    6. Post-process the result.
+    7. Return the final processed result.
+    """
+    # Create prompt template and parser
+    prompt = PromptTemplate.from_template(prompt_template)
+    parser = StrOutputParser()
+
+    # Set up the evaluation chain
+    eval_chain = prompt | model | parser
+
+    # Preprocess input data
+    pre_processed_input = pre_processing_func(input_data)
+
+    # Run the model and get the result
+    if use_langfuse:
+        config = {"callbacks": [langfuse_handler]}
+    else:
+        config = {}
+    raw_result = eval_chain.invoke(pre_processed_input, config=config)
+
+    logging.debug(raw_result)
+
+    # Post-process the result
+    result = post_processing_func(
+        {
+            "prompt": prompt_template,
+            "input": input_data,
+            "output": raw_result,
+        }
+    )
+
+    return result
 
 def llm_as_examiner(
     section: str,  # one of the section in Section enum
@@ -384,6 +440,8 @@ def llm_as_examiner(
     Returns:
         None: Results are saved to the specified output path.
     """
+    result_summary = {"total_steps": 0, "total_score": 0, "score_percentage": 0.0}
+
     logging.info(f"Running llm as examiner on {section}:")
 
     # Check if input_student_model_name is provided
@@ -534,8 +592,15 @@ def llm_as_examiner(
                 post_processing_func=post_processing,
                 **kwargs,
             )
+            match = re.search(r'```json\s*(\{.*?\})\s*```', result, re.DOTALL)
 
-            logging.debug(result)
+            if match:
+                result = match.group(1)
+
+            parsed_dict = json.loads(result)
+            logging.debug(parsed_dict)
+            result_summary["total_steps"] += 1
+            result_summary["total_score"] += int(parsed_dict['score'])
 
             # save result
             if input_student_model_name not in data["output"]:
@@ -545,8 +610,14 @@ def llm_as_examiner(
 
             # save updated dataset
             output_file_path = save_result(output_path, dataset, is_examiner=True)
+    
+    summary_path = Path("result/result_summary.json")
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(summary_path, "w") as f:
+        result_summary["score_percentage"] = result_summary["total_score"] / result_summary["total_steps"]
+        json.dump(result_summary, f)
 
-    logging.info(f"Finished. Output saved to: {output_file_path}")
+    logging.info(f"Finished. Metrics saved to: {summary_path}")
     return output_file_path
 
 
@@ -771,5 +842,5 @@ if __name__ == "__main__":
     dotenv.load_dotenv()
     setup_logging(args.verbose)
     logging.info(args)
- 
+    use_langfuse, langfuse_handler = setup_langfuse()
     main(args)
