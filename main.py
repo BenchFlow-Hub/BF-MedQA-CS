@@ -13,7 +13,6 @@ from typing import Callable, Union, Tuple
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
-from langchain_community.callbacks import get_openai_callback
 
 import utils
 
@@ -227,6 +226,10 @@ def llm_as_medical_student(
 
     # Load the dataset
     dataset = load_data(med_student_dataset_path, is_examiner=False)
+    # For debugging
+    dataset = dataset[:1]
+    print(dataset)
+    exit()
 
     # Parse case range
     start_case, end_case = (1, 44) if str(case) == "all" else parse_range(case)
@@ -242,14 +245,14 @@ def llm_as_medical_student(
     use_dataset_input_data = input_data is None
 
     # Set up the language model
-    if model is None:
-        if model_parameters is None:
-            logging.info(
-                "Using default model parameters: model_name=gpt-4o-mini, temperature=0.9"
-            )
-            model = ChatOpenAI(model_name="gpt-3.5-turbo-1106", temperature=0.9)
-        else:
-            model = ChatOpenAI(**model_parameters)
+    # if model is None:
+    #     if model_parameters is None:
+    #         logging.info(
+    #             "Using default model parameters: model_name=gpt-4o-mini, temperature=0.9"
+    #         )
+    #         model = ChatOpenAI(model_name="gpt-3.5-turbo-1106", temperature=0.9)
+    #     else:
+    #         model = ChatOpenAI(**model_parameters)
 
     # Set default pre-processing and post-processing functions if not provided
     if pre_processing is None:
@@ -297,19 +300,21 @@ def llm_as_medical_student(
                 input_data_dict = input_data[int(data["case_id"])]
 
             # Run the model
-            result = run_model(
-                model=model,
-                prompt_template=prompt,
-                input_data=input_data_dict,
-                pre_processing_func=pre_processing,
-                post_processing_func=post_processing,
-                **kwargs,
-            )
+            print(prompt)
+            print(input_data_dict)
+            # result = run_model(
+            #     model=model,
+            #     prompt_template=prompt,
+            #     input_data=input_data_dict,
+            #     pre_processing_func=pre_processing,
+            #     post_processing_func=post_processing,
+            #     **kwargs,
+            # )
 
-            logging.debug(result)
+            # logging.debug(result)
 
-            # save result
-            data["output"][model.model_name] = result
+            # # save result
+            # data["output"][model.model_name] = result
 
             # save updated dataset
             output_file_path = save_result(output_path, dataset, is_examiner=False)
@@ -766,15 +771,5 @@ if __name__ == "__main__":
     dotenv.load_dotenv()
     setup_logging(args.verbose)
     logging.info(args)
-    use_langfuse, langfuse_handler = setup_langfuse()
-
-    with get_openai_callback() as cb:
-        main(args)
-
-        logging.info("-" * 40)
-        logging.info(f"Successful Requests: {cb.successful_requests}")
-        logging.info(f"Total Tokens: {cb.total_tokens}")
-        logging.info(f"Prompt Tokens: {cb.prompt_tokens}")
-        logging.info(f"Completion Tokens: {cb.completion_tokens}")
-        logging.info(f"Total Cost (USD): ${cb.total_cost}")
-        logging.info("-" * 40)
+ 
+    main(args)
